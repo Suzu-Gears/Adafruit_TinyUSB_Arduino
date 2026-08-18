@@ -129,47 +129,75 @@ extern "C" {
 //--------------------------------------------------------------------
 
 // Size of buffer to hold descriptors and other data used for enumeration
+#ifndef CFG_TUH_ENUMERATION_BUFSIZE
 #define CFG_TUH_ENUMERATION_BUFSIZE 256
+#endif
 
 // Number of hub devices
+#ifndef CFG_TUH_HUB
 #define CFG_TUH_HUB 1
+#endif
 
 // max device support (excluding hub device): 1 hub typically has 4 ports
+#ifndef CFG_TUH_DEVICE_MAX
 #define CFG_TUH_DEVICE_MAX (3 * CFG_TUH_HUB + 1)
+#endif
 
 // enable MIDI Host
+#ifndef CFG_TUH_MIDI
 #define CFG_TUH_MIDI 1
+#endif
 
 // Enable tuh_edpt_xfer() API
 // #define CFG_TUH_API_EDPT_XFER       1
 
 // Number of mass storage
+#ifndef CFG_TUH_MSC
 #define CFG_TUH_MSC 1
+#endif
 
 // Number of HIDs
 // typical keyboard + mouse device can have 3,4 HID interfaces
+#ifndef CFG_TUH_HID
 #define CFG_TUH_HID (3 * CFG_TUH_DEVICE_MAX)
+#endif
 
 // Number of CDC interfaces
 // FTDI and CP210x are not part of CDC class, only to re-use CDC driver API
+#ifndef CFG_TUH_CDC
 #define CFG_TUH_CDC 1
+#endif
+#ifndef CFG_TUH_CDC_FTDI
 #define CFG_TUH_CDC_FTDI 1
+#endif
+#ifndef CFG_TUH_CDC_CP210X
 #define CFG_TUH_CDC_CP210X 1
+#endif
+#ifndef CFG_TUH_CDC_CH34X
 #define CFG_TUH_CDC_CH34X 1
+#endif
 
 // RX & TX fifo size
+#ifndef CFG_TUH_CDC_RX_BUFSIZE
 #define CFG_TUH_CDC_RX_BUFSIZE 128
+#endif
+#ifndef CFG_TUH_CDC_TX_BUFSIZE
 #define CFG_TUH_CDC_TX_BUFSIZE 128
+#endif
 
 // Set Line Control state on enumeration/mounted:
 // DTR ( bit 0), RTS (bit 1)
+#ifndef CFG_TUH_CDC_LINE_CONTROL_ON_ENUM
 #define CFG_TUH_CDC_LINE_CONTROL_ON_ENUM 0x03
+#endif
 
 // Set Line Coding on enumeration/mounted, value for cdc_line_coding_t
 // bit rate = 115200, 1 stop bit, no parity, 8 bit data width
 // This need Pico-PIO-USB at least 0.5.1
+#ifndef CFG_TUH_CDC_LINE_CODING_ON_ENUM
 #define CFG_TUH_CDC_LINE_CODING_ON_ENUM                                        \
   { 115200, CDC_LINE_CODING_STOP_BITS_1, CDC_LINE_CODING_PARITY_NONE, 8 }
+#endif
 
 #ifdef __cplusplus
 }
