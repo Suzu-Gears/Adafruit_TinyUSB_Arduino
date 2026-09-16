@@ -196,6 +196,14 @@ void tud_resume_cb(void);
 // Invoked when there is a new usb event, which need to be processed by tud_task()/tud_task_ext()
 void tud_event_hook_cb(uint8_t rhport, uint32_t eventid, bool in_isr);
 
+// [LOCAL PATCH] Invoked from dcd_event_handler() for EVERY DCD event, before it is filtered
+// or queued (bus reset, unplug, suspend/resume, SOF, SETUP, transfer complete).
+// For DCD_EVENT_SETUP_RECEIVED, setup points at the request in host byte order; otherwise NULL.
+// May run in ISR context: do not block or log directly. Used by USB-Audio-Toolkit to
+// record the host's enumeration fingerprint (which descriptors, in which order, what wLength).
+void tud_dcd_event_tap_cb(uint8_t rhport, uint32_t eventid, tusb_control_request_t const* setup, bool in_isr);
+#define TUSB_USBAT_DCD_EVENT_TAP 1
+
 // Invoked when a new (micro) frame started
 void tud_sof_cb(uint32_t frame_count);
 

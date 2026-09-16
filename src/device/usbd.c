@@ -49,6 +49,11 @@ TU_ATTR_WEAK void tud_event_hook_cb(uint8_t rhport, uint32_t eventid, bool in_is
   (void) rhport; (void) eventid; (void) in_isr;
 }
 
+// [LOCAL PATCH] see usbd.h
+TU_ATTR_WEAK void tud_dcd_event_tap_cb(uint8_t rhport, uint32_t eventid, tusb_control_request_t const* setup, bool in_isr) {
+  (void) rhport; (void) eventid; (void) setup; (void) in_isr;
+}
+
 TU_ATTR_WEAK void tud_sof_cb(uint32_t frame_count) {
   (void) frame_count;
 }
@@ -1371,6 +1376,9 @@ static bool process_get_descriptor(uint8_t rhport, tusb_control_request_t const 
 // DCD Event Handler
 //--------------------------------------------------------------------+
 TU_ATTR_FAST_FUNC void dcd_event_handler(dcd_event_t const* event, bool in_isr) {
+  // [LOCAL PATCH] tap every event before filtering (USB-Audio-Toolkit fingerprint recorder)
+  tud_dcd_event_tap_cb(event->rhport, event->event_id,
+                       (event->event_id == DCD_EVENT_SETUP_RECEIVED) ? &event->setup_received : NULL, in_isr);
   bool send = false;
   switch (event->event_id) {
     case DCD_EVENT_UNPLUGGED:

@@ -73,6 +73,11 @@ TU_ATTR_WEAK void tuh_event_hook_cb(uint8_t rhport, uint32_t eventid, bool in_is
   (void) rhport; (void) eventid; (void) in_isr;
 }
 
+// [LOCAL PATCH] see usbh.h
+TU_ATTR_WEAK void tuh_control_tap_cb(uint8_t daddr, tusb_control_request_t const* setup) {
+  (void) daddr; (void) setup;
+}
+
 TU_ATTR_WEAK bool hcd_dcache_clean(const void* addr, uint32_t data_size) {
   (void) addr; (void) data_size;
   return false;
@@ -836,6 +841,7 @@ bool tuh_control_xfer (tuh_xfer_t* xfer) {
   (void) osal_mutex_unlock(_usbh_mutex);
 
   TU_VERIFY(is_idle);
+  tuh_control_tap_cb(daddr, xfer->setup);  // [LOCAL PATCH] record every control transfer actually submitted
   TU_LOG_USBH("[%u:%u] %s: ", usbh_get_rhport(daddr), daddr,
               (xfer->setup->bmRequestType_bit.type == TUSB_REQ_TYPE_STANDARD && xfer->setup->bRequest <= TUSB_REQ_SYNCH_FRAME) ?
                   tu_str_std_request[xfer->setup->bRequest] : "Class Request");

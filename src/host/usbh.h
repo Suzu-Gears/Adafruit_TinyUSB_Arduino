@@ -144,6 +144,12 @@ void tuh_umount_cb(uint8_t daddr);
 // Invoked when there is a new usb event, which need to be processed by tuh_task()/tuh_task_ext()
 void tuh_event_hook_cb(uint8_t rhport, uint32_t eventid, bool in_isr);
 
+// [LOCAL PATCH] Invoked from tuh_control_xfer() for every control transfer the host stack
+// is about to send, including the ones issued internally during enumeration. Used by
+// USB-Audio-Toolkit to record the tester's own request sequence for comparison with real hosts.
+void tuh_control_tap_cb(uint8_t daddr, tusb_control_request_t const* setup);
+#define TUSB_USBAT_CONTROL_TAP 1
+
 //--------------------------------------------------------------------+
 // APPLICATION API
 //--------------------------------------------------------------------+
