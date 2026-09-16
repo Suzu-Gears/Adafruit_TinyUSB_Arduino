@@ -173,6 +173,14 @@ typedef struct {
   bool     skip_string_prefetch;   // drop the stack's 2-byte string pre-reads (langid/manufacturer/product/serial)
   uint8_t  probe_count;            // extra GET_DESCRIPTOR probes after the full device descriptor, before config
   tuh_enum_probe_t probes[TUH_ENUM_PROFILE_MAX_PROBES];
+  // stage 2 (Linux xHCI / Android imitation). All zero = behave as before.
+  bool     skip_addr0_read;        // no GET_DESCRIPTOR at address 0: SET_ADDRESS comes first (Linux xHCI, Android)
+  uint8_t  assumed_mps0;           // EP0 max packet size assumed while skip_addr0_read (0 = 64)
+  bool     dev_desc_8_first;       // after SET_ADDRESS read DEVICE with wLength 8, then 18 (Linux)
+  uint8_t  cfg_probe_count;        // probes issued after the full configuration read, before SET_CONFIGURATION
+  tuh_enum_probe_t cfg_probes[TUH_ENUM_PROFILE_MAX_PROBES];
+  uint8_t  post_probe_count;       // probes issued after SET_CONFIGURATION, before class drivers open
+  tuh_enum_probe_t post_probes[TUH_ENUM_PROFILE_MAX_PROBES];
 } tuh_enum_profile_t;
 
 // NULL restores the stock TinyUSB sequence. The pointer must stay valid while set (not copied).

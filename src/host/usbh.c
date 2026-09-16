@@ -82,6 +82,14 @@ TU_ATTR_WEAK void tuh_control_tap_cb(uint8_t daddr, tusb_control_request_t const
 static const tuh_enum_profile_t* _enum_profile = NULL;
 static uint8_t _enum_probe_i = 0;       // next probe to issue
 static bool    _enum_reset2_done = false; // second bus reset already performed in this enumeration
+static const tuh_enum_probe_t* _enum_probe_list = NULL; // list being issued (probes / cfg_probes / post_probes)
+static uint8_t _enum_probe_n = 0;
+static uintptr_t _enum_probe_done_state = 0;            // enumeration state to resume when the list is exhausted
+static bool    _enum_cfg_probes_done = false;
+static bool    _enum_post_probes_done = false;
+static uint8_t _enum_saved_config_idx = 0;
+CFG_TUH_MEM_SECTION CFG_TUH_MEM_ALIGN static uint8_t _enum_probe_buf[256]; // probes never clobber the enumeration buffer
+static tusb_control_request_t _enum_fake_setup;          // setup for synthesized completions
 
 void tuh_enum_profile_set(const tuh_enum_profile_t* profile) { _enum_profile = profile; }
 const tuh_enum_profile_t* tuh_enum_profile_get(void) { return _enum_profile; }
@@ -1536,6 +1544,8 @@ enum {
   ENUM_GET_STRING_SERIAL_LEN,
   ENUM_GET_STRING_SERIAL,
   ENUM_PROFILE_PROBE,          // [LOCAL PATCH] completion of one enumeration-profile probe
+  ENUM_PROFILE_PROBE_START,    // [LOCAL PATCH] last stock string read finished: start the pre-config probes
+  ENUM_GET_DEVICE_DESC_18,     // [LOCAL PATCH] 8-byte device descriptor (after SET_ADDRESS) received, now 18
   ENUM_GET_9BYTE_CONFIG_DESC,
   ENUM_GET_FULL_CONFIG_DESC,
   ENUM_SET_CONFIG,
@@ -1563,31 +1573,51 @@ enum {
 // [LOCAL PATCH] issue the next enumeration-profile probe, or hand over to the 9-byte config step.
 // A STALLed probe (e.g. DEVICE_QUALIFIER on a full-speed-only device) completes with
 // XFER_RESULT_STALLED, which process_enumeration() does not treat as a failure - same as real hosts.
+// [LOCAL PATCH] synthesize a successful completion so the state machine continues at 'state'
+static void enum_fake_complete(uint8_t daddr, uintptr_t state, uint16_t wValue, uint16_t wIndex) {
+  memset(&_enum_fake_setup, 0, sizeof(_enum_fake_setup));
+  _enum_fake_setup.wValue = wValue;
+  _enum_fake_setup.wIndex = wIndex;
+  tuh_xfer_t xfer;
+  memset(&xfer, 0, sizeof(xfer));
+  xfer.daddr     = daddr;
+  xfer.result    = XFER_RESULT_SUCCESS;
+  xfer.setup     = &_enum_fake_setup;
+  xfer.buffer    = _usbh_epbuf.ctrl;
+  xfer.user_data = state;
+  process_enumeration(&xfer);
+}
+
 static void enum_profile_probe_next(uint8_t daddr) {
-  const tuh_enum_profile_t* p = _enum_profile;
   usbh_device_t* dev = get_device(daddr);
-  while (p && dev && _enum_probe_i < p->probe_count && _enum_probe_i < TUH_ENUM_PROFILE_MAX_PROBES) {
-    const tuh_enum_probe_t* pr = &p->probes[_enum_probe_i++];
+  while (_enum_probe_list && dev && _enum_probe_i < _enum_probe_n && _enum_probe_i < TUH_ENUM_PROFILE_MAX_PROBES) {
+    const tuh_enum_probe_t* pr = &_enum_probe_list[_enum_probe_i++];
     uint8_t idx = pr->index;
+    const uint16_t len = tu_min16(pr->len, sizeof(_enum_probe_buf));
     if (pr->type == TUSB_DESC_STRING) {
       if (idx == TUH_ENUM_PROBE_IDX_IMANUFACTURER) idx = dev->desc_device.iManufacturer;
       else if (idx == TUH_ENUM_PROBE_IDX_IPRODUCT) idx = dev->desc_device.iProduct;
       else if (idx == TUH_ENUM_PROBE_IDX_ISERIAL) idx = dev->desc_device.iSerialNumber;
       if (idx == 0 && pr->index != 0) continue; // device has no such string: a real host would not ask
       const uint16_t langid = (idx == 0) ? 0x0000 : 0x0409;
-      if (tuh_descriptor_get_string(daddr, idx, langid, _usbh_epbuf.ctrl, pr->len, process_enumeration, ENUM_PROFILE_PROBE)) return;
+      if (tuh_descriptor_get_string(daddr, idx, langid, _enum_probe_buf, len, process_enumeration, ENUM_PROFILE_PROBE)) return;
     } else {
-      if (tuh_descriptor_get(daddr, pr->type, pr->index, _usbh_epbuf.ctrl, pr->len, process_enumeration, ENUM_PROFILE_PROBE)) return;
+      if (tuh_descriptor_get(daddr, pr->type, pr->index, _enum_probe_buf, len, process_enumeration, ENUM_PROFILE_PROBE)) return;
     }
     // could not submit: skip this probe and try the next one
   }
-  tuh_xfer_t xfer; // probes done: continue with the stock 9-byte configuration descriptor step
-  xfer.daddr     = daddr;
-  xfer.result    = XFER_RESULT_SUCCESS;
-  xfer.user_data = ENUM_GET_9BYTE_CONFIG_DESC;
-  process_enumeration(&xfer);
+  // list exhausted: resume the enumeration where the caller asked
+  enum_fake_complete(daddr, _enum_probe_done_state, 0, _enum_saved_config_idx);
 }
 
+// [LOCAL PATCH] start issuing a probe list; when done the state machine resumes at done_state
+static void enum_profile_probes_start(uint8_t daddr, const tuh_enum_probe_t* list, uint8_t n, uintptr_t done_state) {
+  _enum_probe_list = list;
+  _enum_probe_n = n;
+  _enum_probe_i = 0;
+  _enum_probe_done_state = done_state;
+  enum_profile_probe_next(daddr);
+}
 // process async delay in enumeration
 static void enum_delay_async(uintptr_t state) {
   tuh_bus_info_t *dev0_bus = &_usbh_data.dev0_bus;
@@ -1657,6 +1687,16 @@ static void enum_delay_async(uintptr_t state) {
       // Get first 8 bytes of device descriptor for control endpoint size
       // [LOCAL PATCH] profile may ask for more than 8 bytes here (Windows/Linux ask 64; the device
       // answers with a short packet). tuh_descriptor_get_device() clamps to 18, so use the raw getter.
+      if (_enum_profile && _enum_profile->skip_addr0_read) { // [LOCAL PATCH] Linux xHCI / Android: no read at address 0
+        tusb_desc_device_t* fake = (tusb_desc_device_t*) _usbh_epbuf.ctrl;
+        memset(fake, 0, sizeof(*fake));
+        fake->bLength = sizeof(*fake);
+        fake->bDescriptorType = TUSB_DESC_DEVICE;
+        fake->bMaxPacketSize0 = _enum_profile->assumed_mps0 ? _enum_profile->assumed_mps0 : 64;
+        TU_LOG_USBH("Profile: skip address-0 device descriptor, assume EP0 %u\r\n", fake->bMaxPacketSize0);
+        enum_fake_complete(0, ENUM_SET_ADDR, 0, 0);
+        break;
+      }
       {
         const uint16_t len0 = (_enum_profile && _enum_profile->addr0_dev_desc_len) ? _enum_profile->addr0_dev_desc_len : 8;
         TU_LOG_USBH("Get %u byte of Device Descriptor\r\n", len0);
@@ -1673,6 +1713,10 @@ static void enum_delay_async(uintptr_t state) {
         clear_device(new_dev);
         enum_full_complete(false);
         return;
+      }
+      if (_enum_profile && _enum_profile->dev_desc_8_first) { // [LOCAL PATCH] Linux: 8 bytes first, then 18
+        TU_ASSERT(tuh_descriptor_get(new_addr, TUSB_DESC_DEVICE, 0, _usbh_epbuf.ctrl, 8, process_enumeration, ENUM_GET_DEVICE_DESC_18), );
+        break;
       }
       TU_LOG_USBH("Get Device Descriptor\r\n");
       TU_ASSERT(tuh_descriptor_get_device(new_addr, _usbh_epbuf.ctrl, sizeof(tusb_desc_device_t), process_enumeration,
@@ -1715,6 +1759,11 @@ static void enum_new_device(hcd_event_t *event) {
   tuh_bus_info_t *dev0_bus = &_usbh_data.dev0_bus;
   _enum_probe_i = 0;          // [LOCAL PATCH] profile state is per enumeration
   _enum_reset2_done = false;
+  _enum_probe_list = NULL;
+  _enum_probe_n = 0;
+  _enum_cfg_probes_done = false;
+  _enum_post_probes_done = false;
+  _enum_saved_config_idx = 0;
   dev0_bus->rhport         = event->rhport;
   dev0_bus->hub_addr       = event->connection.hub_addr;
   dev0_bus->hub_port       = event->connection.hub_port;
@@ -1838,6 +1887,16 @@ static void process_enumeration(tuh_xfer_t *xfer) {
       break;
     }
 
+    case ENUM_GET_DEVICE_DESC_18: { // [LOCAL PATCH]
+      const tusb_desc_device_t* d8 = (const tusb_desc_device_t*) _usbh_epbuf.ctrl;
+      if (d8->bMaxPacketSize0 != dev->desc_device.bMaxPacketSize0) {
+        TU_LOG_USBH("Profile: device EP0 is %u, assumed %u (kept)\r\n", d8->bMaxPacketSize0, dev->desc_device.bMaxPacketSize0);
+      }
+      TU_ASSERT(tuh_descriptor_get_device(daddr, _usbh_epbuf.ctrl, sizeof(tusb_desc_device_t), process_enumeration,
+                                          ENUM_GET_STRING_LANGUAGE_ID_LEN), );
+      break;
+    }
+
     // For string descriptor (langid, manufacturer, product, serila): always get the first 2 bytes
     // to determine the length first. otherwise, some device may have buffer overflow.
     case ENUM_GET_STRING_LANGUAGE_ID_LEN: {
@@ -1848,8 +1907,7 @@ static void process_enumeration(tuh_xfer_t *xfer) {
 
       tuh_enum_descriptor_device_cb(daddr, desc_device); // callback
       if (_enum_profile && _enum_profile->skip_string_prefetch) { // [LOCAL PATCH]
-        _enum_probe_i = 0;
-        enum_profile_probe_next(daddr);
+        enum_profile_probes_start(daddr, _enum_profile->probes, _enum_profile->probe_count, ENUM_GET_9BYTE_CONFIG_DESC);
         break;
       }
       tuh_descriptor_get_string_langid(daddr, _usbh_epbuf.ctrl, 2,
@@ -1928,11 +1986,16 @@ static void process_enumeration(tuh_xfer_t *xfer) {
         langid = tu_le16toh(xfer->setup->wIndex); // langid from length's request
         const uint8_t str_len = xfer->buffer[0];
         tuh_descriptor_get_string(daddr, dev->desc_device.iSerialNumber, langid, _usbh_epbuf.ctrl, str_len,
-                                  process_enumeration, ENUM_PROFILE_PROBE); // [LOCAL PATCH] profile probes run after the stock strings too
+                                  process_enumeration, ENUM_PROFILE_PROBE_START); // [LOCAL PATCH] profile probes run after the stock strings too
         break;
       }
       TU_ATTR_FALLTHROUGH;
     }
+
+    case ENUM_PROFILE_PROBE_START: // [LOCAL PATCH] stock strings done: pre-config probes (none -> 9-byte config)
+      enum_profile_probes_start(daddr, _enum_profile ? _enum_profile->probes : NULL,
+                                _enum_profile ? _enum_profile->probe_count : 0, ENUM_GET_9BYTE_CONFIG_DESC);
+      break;
 
     case ENUM_PROFILE_PROBE: // [LOCAL PATCH] one probe finished (success or STALL): next one
       enum_profile_probe_next(daddr);
@@ -1966,6 +2029,12 @@ static void process_enumeration(tuh_xfer_t *xfer) {
 
     case ENUM_SET_CONFIG: {
       uint8_t config_idx = (uint8_t) tu_le16toh(xfer->setup->wIndex);
+      if (_enum_profile && _enum_profile->cfg_probe_count && !_enum_cfg_probes_done) { // [LOCAL PATCH]
+        _enum_cfg_probes_done = true;
+        _enum_saved_config_idx = config_idx; // handed back through the synthesized completion's wIndex
+        enum_profile_probes_start(daddr, _enum_profile->cfg_probes, _enum_profile->cfg_probe_count, ENUM_SET_CONFIG);
+        break;
+      }
       if (tuh_enum_descriptor_configuration_cb(daddr, config_idx, (const tusb_desc_configuration_t*) _usbh_epbuf.ctrl)) {
         TU_ASSERT(tuh_configuration_set(daddr, config_idx+1u, process_enumeration, ENUM_CONFIG_DRIVER),);
       } else {
@@ -1979,6 +2048,11 @@ static void process_enumeration(tuh_xfer_t *xfer) {
     }
 
     case ENUM_CONFIG_DRIVER: {
+      if (_enum_profile && _enum_profile->post_probe_count && !_enum_post_probes_done) { // [LOCAL PATCH]
+        _enum_post_probes_done = true;
+        enum_profile_probes_start(daddr, _enum_profile->post_probes, _enum_profile->post_probe_count, ENUM_CONFIG_DRIVER);
+        break;
+      }
       TU_LOG_USBH("Device configured\r\n");
       dev->configured = 1;
 
