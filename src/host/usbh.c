@@ -78,6 +78,14 @@ TU_ATTR_WEAK void tuh_control_tap_cb(uint8_t daddr, tusb_control_request_t const
   (void) daddr; (void) setup;
 }
 
+// [LOCAL PATCH] enumeration profile (see usbh.h)
+static const tuh_enum_profile_t* _enum_profile = NULL;
+static uint8_t _enum_probe_i = 0;       // next probe to issue
+static bool    _enum_reset2_done = false; // second bus reset already performed in this enumeration
+
+void tuh_enum_profile_set(const tuh_enum_profile_t* profile) { _enum_profile = profile; }
+const tuh_enum_profile_t* tuh_enum_profile_get(void) { return _enum_profile; }
+
 TU_ATTR_WEAK bool hcd_dcache_clean(const void* addr, uint32_t data_size) {
   (void) addr; (void) data_size;
   return false;
@@ -1527,6 +1535,7 @@ enum {
   ENUM_GET_STRING_PRODUCT,
   ENUM_GET_STRING_SERIAL_LEN,
   ENUM_GET_STRING_SERIAL,
+  ENUM_PROFILE_PROBE,          // [LOCAL PATCH] completion of one enumeration-profile probe
   ENUM_GET_9BYTE_CONFIG_DESC,
   ENUM_GET_FULL_CONFIG_DESC,
   ENUM_SET_CONFIG,
@@ -1546,7 +1555,38 @@ enum {
   ENUM_AFTER_RESET_HUB_DELAY_RETRY,
   ENUM_AFTER_RESET_RECOVERY_DELAY,
   ENUM_AFTER_SET_ADDRESS_RECOVERY_DELAY,
+  ENUM_AFTER_RESET2_ROOT_DELAY,        // [LOCAL PATCH] optional second reset (profile)
+  ENUM_AFTER_RESET2_ROOT_POST_DELAY,
+  ENUM_AFTER_RESET2_RECOVERY_DELAY,
 };
+
+// [LOCAL PATCH] issue the next enumeration-profile probe, or hand over to the 9-byte config step.
+// A STALLed probe (e.g. DEVICE_QUALIFIER on a full-speed-only device) completes with
+// XFER_RESULT_STALLED, which process_enumeration() does not treat as a failure - same as real hosts.
+static void enum_profile_probe_next(uint8_t daddr) {
+  const tuh_enum_profile_t* p = _enum_profile;
+  usbh_device_t* dev = get_device(daddr);
+  while (p && dev && _enum_probe_i < p->probe_count && _enum_probe_i < TUH_ENUM_PROFILE_MAX_PROBES) {
+    const tuh_enum_probe_t* pr = &p->probes[_enum_probe_i++];
+    uint8_t idx = pr->index;
+    if (pr->type == TUSB_DESC_STRING) {
+      if (idx == TUH_ENUM_PROBE_IDX_IMANUFACTURER) idx = dev->desc_device.iManufacturer;
+      else if (idx == TUH_ENUM_PROBE_IDX_IPRODUCT) idx = dev->desc_device.iProduct;
+      else if (idx == TUH_ENUM_PROBE_IDX_ISERIAL) idx = dev->desc_device.iSerialNumber;
+      if (idx == 0 && pr->index != 0) continue; // device has no such string: a real host would not ask
+      const uint16_t langid = (idx == 0) ? 0x0000 : 0x0409;
+      if (tuh_descriptor_get_string(daddr, idx, langid, _usbh_epbuf.ctrl, pr->len, process_enumeration, ENUM_PROFILE_PROBE)) return;
+    } else {
+      if (tuh_descriptor_get(daddr, pr->type, pr->index, _usbh_epbuf.ctrl, pr->len, process_enumeration, ENUM_PROFILE_PROBE)) return;
+    }
+    // could not submit: skip this probe and try the next one
+  }
+  tuh_xfer_t xfer; // probes done: continue with the stock 9-byte configuration descriptor step
+  xfer.daddr     = daddr;
+  xfer.result    = XFER_RESULT_SUCCESS;
+  xfer.user_data = ENUM_GET_9BYTE_CONFIG_DESC;
+  process_enumeration(&xfer);
+}
 
 // process async delay in enumeration
 static void enum_delay_async(uintptr_t state) {
@@ -1615,8 +1655,13 @@ static void enum_delay_async(uintptr_t state) {
         return;
       }
       // Get first 8 bytes of device descriptor for control endpoint size
-      TU_LOG_USBH("Get 8 byte of Device Descriptor\r\n");
-      TU_ASSERT(tuh_descriptor_get_device(0, _usbh_epbuf.ctrl, 8, process_enumeration, ENUM_SET_ADDR), );
+      // [LOCAL PATCH] profile may ask for more than 8 bytes here (Windows/Linux ask 64; the device
+      // answers with a short packet). tuh_descriptor_get_device() clamps to 18, so use the raw getter.
+      {
+        const uint16_t len0 = (_enum_profile && _enum_profile->addr0_dev_desc_len) ? _enum_profile->addr0_dev_desc_len : 8;
+        TU_LOG_USBH("Get %u byte of Device Descriptor\r\n", len0);
+        TU_ASSERT(tuh_descriptor_get(0, TUSB_DESC_DEVICE, 0, _usbh_epbuf.ctrl, len0, process_enumeration, ENUM_SET_ADDR), );
+      }
       break;
 
     case ENUM_AFTER_SET_ADDRESS_RECOVERY_DELAY: {
@@ -1635,6 +1680,31 @@ static void enum_delay_async(uintptr_t state) {
       break;
     }
 
+    // [LOCAL PATCH] second bus reset requested by the enumeration profile (mirrors Windows:
+    // reset -> GET_DESCRIPTOR(DEVICE, 64) -> reset -> SET_ADDRESS). Root port only.
+    case ENUM_AFTER_RESET2_ROOT_DELAY:
+      hcd_port_reset_end(dev0_bus->rhport);
+      usbh_defer_func_ms_async(ENUM_RESET_ROOT_POST_DELAY_MS, enum_delay_async, ENUM_AFTER_RESET2_ROOT_POST_DELAY);
+      break;
+
+    case ENUM_AFTER_RESET2_ROOT_POST_DELAY:
+      if (!hcd_port_connect_status(dev0_bus->rhport)) {
+        enum_full_complete(false);
+        return;
+      }
+      usbh_defer_func_ms_async(ENUM_RESET_RECOVERY_DELAY_MS, enum_delay_async, ENUM_AFTER_RESET2_RECOVERY_DELAY);
+      break;
+
+    case ENUM_AFTER_RESET2_RECOVERY_DELAY: {
+      // the address-0 device descriptor read before the reset is still in _usbh_epbuf.ctrl
+      tuh_xfer_t xfer;
+      xfer.daddr     = 0;
+      xfer.result    = XFER_RESULT_SUCCESS;
+      xfer.user_data = ENUM_SET_ADDR;
+      process_enumeration(&xfer);
+      break;
+    }
+
     default:
       break;
   }
@@ -1643,6 +1713,8 @@ static void enum_delay_async(uintptr_t state) {
 // start a new enumeration process
 static void enum_new_device(hcd_event_t *event) {
   tuh_bus_info_t *dev0_bus = &_usbh_data.dev0_bus;
+  _enum_probe_i = 0;          // [LOCAL PATCH] profile state is per enumeration
+  _enum_reset2_done = false;
   dev0_bus->rhport         = event->rhport;
   dev0_bus->hub_addr       = event->connection.hub_addr;
   dev0_bus->hub_port       = event->connection.hub_port;
@@ -1729,6 +1801,13 @@ static void process_enumeration(tuh_xfer_t *xfer) {
 
     case ENUM_SET_ADDR: {
       const tusb_desc_device_t *desc_device = (const tusb_desc_device_t *) _usbh_epbuf.ctrl;
+      // [LOCAL PATCH] optional second bus reset between the address-0 read and SET_ADDRESS
+      if (_enum_profile && _enum_profile->reset_after_addr0_desc && !_enum_reset2_done && dev0_bus->hub_addr == 0) {
+        _enum_reset2_done = true;
+        hcd_port_reset(dev0_bus->rhport);
+        usbh_defer_func_ms_async(ENUM_RESET_ROOT_DELAY_MS, enum_delay_async, ENUM_AFTER_RESET2_ROOT_DELAY);
+        break;
+      }
       if (!(desc_device->bDescriptorType == TUSB_DESC_DEVICE && desc_device->bMaxPacketSize0 >= 8)) {
         TU_LOG_USBH("Invalid Device descriptor\r\n");
         is_enum_failed = true;
@@ -1768,6 +1847,11 @@ static void process_enumeration(tuh_xfer_t *xfer) {
       memcpy(&dev->desc_device, (const uint8_t*) desc_device + offsetof(tusb_desc_device_t, bcdUSB), sizeof(desc_device_noheader_t));
 
       tuh_enum_descriptor_device_cb(daddr, desc_device); // callback
+      if (_enum_profile && _enum_profile->skip_string_prefetch) { // [LOCAL PATCH]
+        _enum_probe_i = 0;
+        enum_profile_probe_next(daddr);
+        break;
+      }
       tuh_descriptor_get_string_langid(daddr, _usbh_epbuf.ctrl, 2,
                                        process_enumeration, ENUM_GET_STRING_LANGUAGE_ID);
       break;
@@ -1849,6 +1933,10 @@ static void process_enumeration(tuh_xfer_t *xfer) {
       }
       TU_ATTR_FALLTHROUGH;
     }
+
+    case ENUM_PROFILE_PROBE: // [LOCAL PATCH] one probe finished (success or STALL): next one
+      enum_profile_probe_next(daddr);
+      break;
 
     case ENUM_GET_9BYTE_CONFIG_DESC: {
       // Get 9-byte for total length

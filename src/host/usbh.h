@@ -150,6 +150,36 @@ void tuh_event_hook_cb(uint8_t rhport, uint32_t eventid, bool in_isr);
 void tuh_control_tap_cb(uint8_t daddr, tusb_control_request_t const* setup);
 #define TUSB_USBAT_CONTROL_TAP 1
 
+// [LOCAL PATCH] Enumeration profile: make this host imitate a given OS's enumeration fingerprint
+// (which descriptors it asks for, with what wLength, in what order, how many bus resets) so that
+// devices which change behaviour by host type can be tested. Takes effect on the next enumeration.
+typedef struct {
+  uint8_t  type;   // TUSB_DESC_DEVICE / TUSB_DESC_CONFIGURATION / TUSB_DESC_STRING / TUSB_DESC_DEVICE_QUALIFIER ...
+  uint8_t  index;  // descriptor index; for strings TUH_ENUM_PROBE_IDX_* resolves to the device's iXxx fields
+  uint16_t len;    // wLength
+} tuh_enum_probe_t;
+
+enum {
+  TUH_ENUM_PROBE_IDX_IMANUFACTURER = 0xFD,
+  TUH_ENUM_PROBE_IDX_IPRODUCT      = 0xFE,
+  TUH_ENUM_PROBE_IDX_ISERIAL       = 0xFF,
+  TUH_ENUM_PROFILE_MAX_PROBES      = 12,
+};
+
+typedef struct {
+  const char* name;
+  uint16_t addr0_dev_desc_len;   // first GET_DESCRIPTOR(DEVICE) at address 0: 8 (TinyUSB) / 64 (Windows, Linux)
+  bool     reset_after_addr0_desc; // second bus reset between that read and SET_ADDRESS (Windows does this)
+  bool     skip_string_prefetch;   // drop the stack's 2-byte string pre-reads (langid/manufacturer/product/serial)
+  uint8_t  probe_count;            // extra GET_DESCRIPTOR probes after the full device descriptor, before config
+  tuh_enum_probe_t probes[TUH_ENUM_PROFILE_MAX_PROBES];
+} tuh_enum_profile_t;
+
+// NULL restores the stock TinyUSB sequence. The pointer must stay valid while set (not copied).
+void tuh_enum_profile_set(const tuh_enum_profile_t* profile);
+const tuh_enum_profile_t* tuh_enum_profile_get(void);
+#define TUSB_USBAT_ENUM_PROFILE 1
+
 //--------------------------------------------------------------------+
 // APPLICATION API
 //--------------------------------------------------------------------+
