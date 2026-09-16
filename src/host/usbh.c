@@ -1928,7 +1928,7 @@ static void process_enumeration(tuh_xfer_t *xfer) {
         langid = tu_le16toh(xfer->setup->wIndex); // langid from length's request
         const uint8_t str_len = xfer->buffer[0];
         tuh_descriptor_get_string(daddr, dev->desc_device.iSerialNumber, langid, _usbh_epbuf.ctrl, str_len,
-                                  process_enumeration, ENUM_GET_9BYTE_CONFIG_DESC);
+                                  process_enumeration, ENUM_PROFILE_PROBE); // [LOCAL PATCH] profile probes run after the stock strings too
         break;
       }
       TU_ATTR_FALLTHROUGH;
