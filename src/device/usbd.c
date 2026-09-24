@@ -54,6 +54,12 @@ TU_ATTR_WEAK void tud_dcd_event_tap_cb(uint8_t rhport, uint32_t eventid, tusb_co
   (void) rhport; (void) eventid; (void) setup; (void) in_isr;
 }
 
+// [LOCAL PATCH] see usbd.h
+TU_ATTR_WEAK bool tud_proxy_std_request_cb(uint8_t rhport, tusb_control_request_t const* request) {
+  (void) rhport; (void) request;
+  return false;
+}
+
 TU_ATTR_WEAK void tud_sof_cb(uint32_t frame_count) {
   (void) frame_count;
 }
@@ -1109,6 +1115,14 @@ static bool process_setup_received(uint8_t rhport, tusb_control_request_t const 
         // Non-standard request is not supported
         TU_BREAKPOINT();
         return false;
+      }
+
+      // [LOCAL PATCH] transparent proxy (USB-Audio-Toolkit): the application may take over a standard
+      // device request (returns true, then answers later with tud_control_xfer / tud_control_status while
+      // EP0 NAKs). SET_ADDRESS and SET_CONFIGURATION are still processed here: for those the callback only
+      // observes (and forwards them itself) and returns false
+      if (tud_proxy_std_request_cb(rhport, p_request)) {
+        return true;
       }
 
       return process_std_device_request(rhport, p_request);

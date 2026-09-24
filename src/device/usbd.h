@@ -204,6 +204,13 @@ void tud_event_hook_cb(uint8_t rhport, uint32_t eventid, bool in_isr);
 void tud_dcd_event_tap_cb(uint8_t rhport, uint32_t eventid, tusb_control_request_t const* setup, bool in_isr);
 #define TUSB_USBAT_DCD_EVENT_TAP 1
 
+// [LOCAL PATCH] transparent proxy: invoked (tud_task context) for every standard request to the device
+// recipient before the stack processes it. Return true to take it over: the application must then answer
+// later with tud_control_xfer() / tud_control_status() (EP0 NAKs until then). SET_ADDRESS and
+// SET_CONFIGURATION must be left to the stack (return false); the callback may forward them elsewhere.
+bool tud_proxy_std_request_cb(uint8_t rhport, tusb_control_request_t const* request);
+#define TUSB_USBAT_PROXY_DEVICE 1
+
 // Invoked when a new (micro) frame started
 void tud_sof_cb(uint32_t frame_count);
 

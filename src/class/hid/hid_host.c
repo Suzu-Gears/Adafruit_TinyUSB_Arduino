@@ -636,15 +636,22 @@ static void process_set_config(tuh_xfer_t* xfer) {
         TU_LOG_DRV("HID Skip Report Descriptor since it is too large %u bytes\r\n", p_hid->report_desc_len);
         config_driver_mount_complete(daddr, idx, NULL, 0);
       } else {
+        // [LOCAL PATCH] the enumeration profile may ask for more than wReportLength, like Windows does (+64)
+        uint16_t req_len = p_hid->report_desc_len;
+        const tuh_enum_profile_t* prof = tuh_enum_profile_get();
+        if (prof && prof->hid_report_extra_len) {
+          req_len = (uint16_t) tu_min32((uint32_t) req_len + prof->hid_report_extra_len, CFG_TUH_ENUMERATION_BUFSIZE);
+        }
         tuh_descriptor_get_hid_report(daddr, itf_num, p_hid->report_desc_type, 0,
-                                      usbh_get_enum_buf(), p_hid->report_desc_len,
+                                      usbh_get_enum_buf(), req_len,
                                       process_set_config, CONFIG_COMPLETE);
       }
       break;
 
     case CONFIG_COMPLETE: {
       const uint8_t *desc_report = usbh_get_enum_buf();
-      const uint16_t desc_len    = tu_le16toh(xfer->setup->wLength);
+      // [LOCAL PATCH] the length actually received (wLength may be larger than the descriptor, see above)
+      const uint16_t desc_len    = (uint16_t) tu_min32(xfer->actual_len, tu_le16toh(xfer->setup->wLength));
 
       config_driver_mount_complete(daddr, idx, desc_report, desc_len);
       break;

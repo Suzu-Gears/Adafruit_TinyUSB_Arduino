@@ -181,7 +181,28 @@ typedef struct {
   tuh_enum_probe_t cfg_probes[TUH_ENUM_PROFILE_MAX_PROBES];
   uint8_t  post_probe_count;       // probes issued after SET_CONFIGURATION, before class drivers open
   tuh_enum_probe_t post_probes[TUH_ENUM_PROFILE_MAX_PROBES];
+  // stage 3. The HID host driver asks for the report descriptor with wLength = wReportLength + this.
+  // Windows' HID class driver asks for 64 more than the length in the HID descriptor (iOS / Android ask
+  // for the exact length), and some devices use that to tell Windows apart. 0 = exact length (stock)
+  uint16_t hid_report_extra_len;
 } tuh_enum_profile_t;
+#define TUSB_USBAT_ENUM_PROFILE_HID_EXTRA 1
+
+// [LOCAL PATCH] transparent proxy (USB-Audio-Toolkit). While held, a device attached to a root port is
+// not enumerated by the stack: the application resets it and drives it with raw control transfers,
+// so that the device sees exactly the request sequence of another host (the one the application relays).
+//   tuh_proxy_hold(true)      stop enumerating newly attached root-port devices (already mounted ones stay)
+//   tuh_proxy_dev0_present()  a held device is attached (waiting at the default address)
+//   tuh_proxy_bus_reset()     bus-reset it; afterwards tuh_control_xfer(daddr = 0, ...) works (EP0 = mps0)
+//   tuh_proxy_set_address()   after a SET_ADDRESS(new_addr) sent to address 0 succeeded: make new_addr usable
+//                             (tuh_control_xfer / tuh_edpt_open / tuh_edpt_xfer); the device stays unconfigured
+//                             in the stack, no class driver is bound
+void tuh_proxy_hold(bool hold);
+bool tuh_proxy_held(void);
+bool tuh_proxy_dev0_present(void);
+bool tuh_proxy_bus_reset(uint8_t mps0, uint32_t reset_ms);
+bool tuh_proxy_set_address(uint8_t new_addr, uint8_t mps0);
+#define TUSB_USBAT_PROXY 1
 
 // NULL restores the stock TinyUSB sequence. The pointer must stay valid while set (not copied).
 void tuh_enum_profile_set(const tuh_enum_profile_t* profile);

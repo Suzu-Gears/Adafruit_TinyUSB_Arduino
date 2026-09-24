@@ -88,8 +88,14 @@ static uintptr_t _enum_probe_done_state = 0;            // enumeration state to 
 static bool    _enum_cfg_probes_done = false;
 static bool    _enum_post_probes_done = false;
 static uint8_t _enum_saved_config_idx = 0;
-CFG_TUH_MEM_SECTION CFG_TUH_MEM_ALIGN static uint8_t _enum_probe_buf[256]; // probes never clobber the enumeration buffer
+// probes never clobber the enumeration buffer. 512: Windows asks strings with wLength 500 and 258 after
+// SET_CONFIGURATION, and wLength is clamped to this size (a smaller buffer would change the fingerprint)
+CFG_TUH_MEM_SECTION CFG_TUH_MEM_ALIGN static uint8_t _enum_probe_buf[512];
 static tusb_control_request_t _enum_fake_setup;          // setup for synthesized completions
+
+// [LOCAL PATCH] transparent proxy (see usbh.h): newly attached root-port devices are not enumerated
+static bool _proxy_hold = false;
+static bool _proxy_dev0_present = false;
 
 void tuh_enum_profile_set(const tuh_enum_profile_t* profile) { _enum_profile = profile; }
 const tuh_enum_profile_t* tuh_enum_profile_get(void) { return _enum_profile; }
@@ -729,6 +735,17 @@ void tuh_task_ext(uint32_t timeout_ms, bool in_isr) {
         // Force remove currently mounted with the same bus info (rhport, hub addr, hub port) if exists
         process_remove_event(&event);
 
+        // [LOCAL PATCH] transparent proxy: remember the bus of the new device but do not enumerate it.
+        // The application drives it with tuh_proxy_bus_reset() and raw control transfers (see usbh.h)
+        if (_proxy_hold && event.connection.hub_addr == 0) {
+          _usbh_data.dev0_bus.rhport   = event.rhport;
+          _usbh_data.dev0_bus.hub_addr = 0;
+          _usbh_data.dev0_bus.hub_port = 0;
+          _usbh_data.dev0_bus.speed    = hcd_port_speed_get(event.rhport);
+          _proxy_dev0_present = true;
+          break;
+        }
+
         // due to the shared control buffer, we must fully complete enumerating one device first.
         if (_usbh_data.enumerating_daddr == TUSB_INDEX_INVALID_8) {
           // New device attached and we are ready
@@ -746,6 +763,7 @@ void tuh_task_ext(uint32_t timeout_ms, bool in_isr) {
 
       case HCD_EVENT_DEVICE_REMOVE:
         TU_LOG_USBH("[%u:%u:%u] USBH Device Removed\r\n", event.rhport, event.connection.hub_addr, event.connection.hub_port);
+        if (event.connection.hub_addr == 0) _proxy_dev0_present = false; // [LOCAL PATCH] transparent proxy
         process_remove_event(&event);
         break;
 
@@ -2213,6 +2231,58 @@ static void enum_full_complete(bool success) {
     hub_edpt_status_xfer(_usbh_data.dev0_bus.hub_addr);
   }
   #endif
+}
+
+//--------------------------------------------------------------------+
+// [LOCAL PATCH] transparent proxy (USB-Audio-Toolkit, see usbh.h)
+//--------------------------------------------------------------------+
+void tuh_proxy_hold(bool hold) {
+  _proxy_hold = hold;
+  if (!hold) _proxy_dev0_present = false;
+}
+
+bool tuh_proxy_held(void) { return _proxy_hold; }
+
+bool tuh_proxy_dev0_present(void) { return _proxy_hold && _proxy_dev0_present; }
+
+bool tuh_proxy_bus_reset(uint8_t mps0, uint32_t reset_ms) {
+  TU_VERIFY(_proxy_hold && _proxy_dev0_present);
+  const uint8_t rhport = _usbh_data.dev0_bus.rhport;
+  // the device goes back to address 0: forget whatever address it had
+  for (uint8_t dev_id = 0; dev_id < TOTAL_DEVICES; dev_id++) {
+    usbh_device_t* dev = &_usbh_devices[dev_id];
+    if (dev->connected && dev->bus_info.rhport == rhport && dev->bus_info.hub_addr == 0) {
+      usbh_device_close(rhport, (uint8_t) (dev_id + 1u));
+      clear_device(dev);
+    }
+  }
+  usbh_device_close(rhport, 0);
+  _control_set_xfer_stage(CONTROL_STAGE_IDLE);
+
+  hcd_port_reset(rhport);
+  const uint32_t t0 = tusb_time_millis_api();
+  while (tusb_time_millis_api() - t0 < reset_ms) {}
+  hcd_port_reset_end(rhport);
+  const uint32_t t1 = tusb_time_millis_api();
+  while (tusb_time_millis_api() - t1 < ENUM_RESET_ROOT_POST_DELAY_MS) {}
+  TU_VERIFY(hcd_port_connect_status(rhport));
+
+  _usbh_data.dev0_bus.speed = hcd_port_speed_get(rhport);
+  _usbh_data.enumerating_daddr = 0; // tuh_connected(0) / tuh_control_xfer(0, ...) from here on
+  return usbh_edpt_control_open(0, mps0);
+}
+
+bool tuh_proxy_set_address(uint8_t new_addr, uint8_t mps0) {
+  TU_VERIFY(_proxy_hold && new_addr != 0);
+  usbh_device_t* dev = get_device(new_addr);
+  TU_VERIFY(dev);
+  clear_device(dev);
+  dev->bus_info = _usbh_data.dev0_bus;
+  dev->connected = 1;
+  dev->addressed = 1;
+  dev->desc_device.bMaxPacketSize0 = mps0;
+  usbh_device_close(_usbh_data.dev0_bus.rhport, 0); // closes dev0 and ends the "enumerating address 0" state
+  return usbh_edpt_control_open(new_addr, mps0);
 }
 
 #endif
