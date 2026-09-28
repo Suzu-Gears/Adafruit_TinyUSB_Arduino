@@ -743,6 +743,9 @@ void tuh_task_ext(uint32_t timeout_ms, bool in_isr) {
           _usbh_data.dev0_bus.hub_port = 0;
           _usbh_data.dev0_bus.speed    = hcd_port_speed_get(event.rhport);
           _proxy_dev0_present = true;
+          // no enumeration will clear the attach debounce flag set in hcd_event_handler(): clear it here, or every
+          // later attach / remove of this root port is dropped (the unplug was never seen, 2026-09-28)
+          _usbh_data.attach_debouncing_bm &= (uint8_t) ~TU_BIT(event.rhport);
           break;
         }
 
@@ -2238,7 +2241,14 @@ static void enum_full_complete(bool success) {
 //--------------------------------------------------------------------+
 void tuh_proxy_hold(bool hold) {
   _proxy_hold = hold;
-  if (!hold) _proxy_dev0_present = false;
+  if (!hold) {
+    _proxy_dev0_present = false;
+    // hand the root port back to the stack. A bus reset relayed while held leaves "enumerating address 0" behind,
+    // which defers every new attach; clear it and any attach debounce flag so the next attach is enumerated
+    // (after a proxy session the tester never read the next earphone, 2026-09-28)
+    _usbh_data.attach_debouncing_bm = 0;
+    if (_usbh_data.enumerating_daddr == 0) usbh_device_close(_usbh_data.dev0_bus.rhport, 0);
+  }
 }
 
 bool tuh_proxy_held(void) { return _proxy_hold; }

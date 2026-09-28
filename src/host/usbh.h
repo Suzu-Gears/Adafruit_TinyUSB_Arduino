@@ -192,6 +192,8 @@ typedef struct {
 // not enumerated by the stack: the application resets it and drives it with raw control transfers,
 // so that the device sees exactly the request sequence of another host (the one the application relays).
 //   tuh_proxy_hold(true)      stop enumerating newly attached root-port devices (already mounted ones stay)
+//   tuh_proxy_hold(false)     give the root port back: the next attach is enumerated as usual (the proxied device is
+//                             removed by that attach)
 //   tuh_proxy_dev0_present()  a held device is attached (waiting at the default address)
 //   tuh_proxy_bus_reset()     bus-reset it; afterwards tuh_control_xfer(daddr = 0, ...) works (EP0 = mps0)
 //   tuh_proxy_set_address()   after a SET_ADDRESS(new_addr) sent to address 0 succeeded: make new_addr usable
@@ -203,6 +205,7 @@ bool tuh_proxy_dev0_present(void);
 bool tuh_proxy_bus_reset(uint8_t mps0, uint32_t reset_ms);
 bool tuh_proxy_set_address(uint8_t new_addr, uint8_t mps0);
 #define TUSB_USBAT_PROXY 1
+#define TUSB_USBAT_PROXY_RELEASE 1  // hold / release no longer leave the attach debounce and "enumerating 0" set
 
 // NULL restores the stock TinyUSB sequence. The pointer must stay valid while set (not copied).
 void tuh_enum_profile_set(const tuh_enum_profile_t* profile);
