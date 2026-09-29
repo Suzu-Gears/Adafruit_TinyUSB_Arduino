@@ -164,7 +164,12 @@ enum {
   TUH_ENUM_PROBE_IDX_IPRODUCT      = 0xFE,
   TUH_ENUM_PROBE_IDX_ISERIAL       = 0xFF,
   TUH_ENUM_PROFILE_MAX_PROBES      = 12,
+  // [LOCAL PATCH] len: ask for the bLength that the previous probe returned (a real host reads a string with
+  // wLength 2 or 4 first, then again with the length the device reported). Keeps a profile independent of the device
+  TUH_ENUM_PROBE_LEN_PREV          = 0,
 };
+#define TUSB_USBAT_ENUM_PROBE_LEN_PREV 1
+#define TUSB_USBAT_ENUM_ADDR0_MPS64 1  // [LOCAL PATCH] EP0 at address 0 is opened with 64 when the profile reads > 8 bytes there
 
 typedef struct {
   const char* name;

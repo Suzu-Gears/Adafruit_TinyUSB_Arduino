@@ -1614,7 +1614,10 @@ static void enum_profile_probe_next(uint8_t daddr) {
   while (_enum_probe_list && dev && _enum_probe_i < _enum_probe_n && _enum_probe_i < TUH_ENUM_PROFILE_MAX_PROBES) {
     const tuh_enum_probe_t* pr = &_enum_probe_list[_enum_probe_i++];
     uint8_t idx = pr->index;
-    const uint16_t len = tu_min16(pr->len, sizeof(_enum_probe_buf));
+    // [LOCAL PATCH] TUH_ENUM_PROBE_LEN_PREV: the bLength the previous probe got back (the buffer still holds it)
+    uint16_t want = pr->len;
+    if (want == TUH_ENUM_PROBE_LEN_PREV) want = _enum_probe_buf[0] >= 2 ? _enum_probe_buf[0] : 255;
+    const uint16_t len = tu_min16(want, sizeof(_enum_probe_buf));
     if (pr->type == TUSB_DESC_STRING) {
       if (idx == TUH_ENUM_PROBE_IDX_IMANUFACTURER) idx = dev->desc_device.iManufacturer;
       else if (idx == TUH_ENUM_PROBE_IDX_IPRODUCT) idx = dev->desc_device.iProduct;
@@ -1698,9 +1701,14 @@ static void enum_delay_async(uintptr_t state) {
       break;
   #endif
 
-    case ENUM_AFTER_RESET_RECOVERY_DELAY:
+    case ENUM_AFTER_RESET_RECOVERY_DELAY: {
       // TODO probably doesn't need to open/close each enumeration
-      if (!usbh_edpt_control_open(0, 8)) {
+      // [LOCAL PATCH] a profile that reads more than 8 bytes at address 0 (Windows / Linux ask 64) opens EP0 with 64,
+      // as those hosts do. With 8, a device whose EP0 is 64 sends its 18-byte descriptor in one packet, the host keeps
+      // only 8 bytes, asks for the rest, and the device (already done) NAKs until the enumeration gives up
+      // (2026-09-29, Apple EarPods 05AC:110B under the Windows / Android profiles)
+      const uint8_t mps0 = (_enum_profile && _enum_profile->addr0_dev_desc_len > 8) ? 64 : 8;
+      if (!usbh_edpt_control_open(0, mps0)) {
         TU_LOG_USBH("Failed to open dev0's control endpoint\r\n");
         enum_full_complete(false); // Stop enumeration gracefully
         return;
@@ -1724,6 +1732,7 @@ static void enum_delay_async(uintptr_t state) {
         TU_ASSERT(tuh_descriptor_get(0, TUSB_DESC_DEVICE, 0, _usbh_epbuf.ctrl, len0, process_enumeration, ENUM_SET_ADDR), );
       }
       break;
+    }
 
     case ENUM_AFTER_SET_ADDRESS_RECOVERY_DELAY: {
       const uint8_t  new_addr = _usbh_data.enumerating_daddr;
